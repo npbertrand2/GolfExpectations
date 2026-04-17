@@ -6,7 +6,7 @@ test.describe("Expected-score workflow placeholder", () => {
 
     // This test is intentionally lightweight until the MVP form is implemented.
     // It keeps the E2E harness wired and ready for ATDD red-phase expansion.
-    await expect(page.getByRole("heading", { name: /get started/i })).toBeVisible();
+    await expect(page.getByTestId("mvp-root")).toBeVisible();
     await expect(roundInput.holes).toHaveLength(18);
   });
 });

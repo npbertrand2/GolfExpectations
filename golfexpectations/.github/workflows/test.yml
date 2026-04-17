@@ -1,0 +1,163 @@
+name: Test Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: "0 2 * * 0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Unit tests
+        run: npm test
+
+  test:
+    name: Test (Shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run shard tests
+        run: npm run test:e2e -- --shard=${{ matrix.shard }}/4
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.shard }}
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 30
+
+  burn-in:
+    name: Burn-In (Flaky Detection)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: test
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+          cache: npm
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Run burn-in loop (10 iterations)
+        run: |
+          for i in {1..10}; do
+            echo "Burn-in iteration $i/10"
+            npm run test:e2e || exit 1
+          done
+
+      - name: Upload burn-in artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: burn-in-failures
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 30
+
+  quality-gates:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    needs: [test, burn-in]
+    if: always()
+    steps:
+      - name: Enforce gate status
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "P0/P1 gate failed: test stage unsuccessful"
+            exit 1
+          fi
+          if [ "${{ needs.burn-in.result }}" = "failure" ]; then
+            echo "Burn-in gate failed: flaky behavior detected"
+            exit 1
+          fi
+          echo "Quality gates passed"
+
+  report:
+    name: Test Report
+    runs-on: ubuntu-latest
+    needs: [test, burn-in, quality-gates]
+    if: always()
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Write summary
+        run: |
+          echo "## CI Test Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Test job: ${{ needs.test.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Burn-in: ${{ needs.burn-in.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Quality gate: ${{ needs.quality-gates.result }}" >> "$GITHUB_STEP_SUMMARY"
